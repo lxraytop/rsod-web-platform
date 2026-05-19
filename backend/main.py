@@ -1,74 +1,98 @@
-# 导入FastAPI框架核心类，用于创建Web应用
-from fastapi import FastAPI
-# 导入CORS中间件，处理跨域资源共享问题
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, UploadFile, File
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+from ultralytics import YOLO
+import os
+import uuid
+from PIL import Image
+import uvicorn
 
-# ====================FastAPI应用实例化 ====================
-# 创建FastAPI应用对象，配置API文档信息
-# 参数说明：
-# - title: API文档显示的标题
-# - description: API文档的详细描述
-# - version: API版本号，便于版本管理
-app = FastAPI(
-    title="遥感目标智能检测平台",
-    description="基于YOLO11的遥感图像目标检测系统API，支持飞机、油罐、立交桥、操场等目标检测",
-    version="1.0.0"
-)
+app = FastAPI()
 
-# ====================CORS跨域中间件配置 ====================
-# 配置跨域访问规则，允许前端应用访问后端API
-# 参数说明：
-# - allow_origins: 允许访问的源地址列表，["*"]表示允许所有来源（生产环境需限制）
-# - allow_credentials: 是否允许携带身份凭证（如Cookie、Token）
-# - allow_methods: 允许的HTTP方法（GET、POST、PUT、DELETE等）
-# - allow_headers: 允许的请求头字段
+# 挂载静态文件
+os.makedirs("static", exist_ok=True)
+os.makedirs("static/results", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# 加载 YOLO 模型（替换为你的模型路径）
+model = YOLO("yolo11n.pt")  # 或你的自定义模型权重
+
+# 允许 Vue 前端跨域访问
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # 开发环境允许所有来源，生产环境应指定具体域名
-    allow_credentials=True,       # 启用凭证支持
-    allow_methods=["*"],          # 允许所有HTTP方法
-    allow_headers=["*"],          # 允许所有请求头
+    allow_origins=["http://localhost:5173"],  # Vue 默认端口
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# ====================API接口定义 ====================
+# 测试连接接口（已验证可用）
+@app.get("/api/test/connect")
+async def test_connect():
+    return {"code": 200, "message": "前后端连通成功！"}
 
-# 健康检查接口 - GET请求
-# @app.get装饰器定义GET请求接口
-# tags参数用于在Swagger文档中分组显示
-@app.get("/health", tags=["健康检查"])
-async def health_check():
-    """
-    健康检查接口
-    用于检测服务运行状态，支持负载均衡器健康检查
+# 核心推理接口
+@app.post("/api/inference/single")
+async def inference_single(file: UploadFile = File(...)):
+    try:
+        # 1. 保存临时文件
+        temp_filename = f"temp_{uuid.uuid4().hex}.jpg"
+        temp_path = os.path.join("static", temp_filename)
+        with open(temp_path, "wb") as f:
+            f.write(await file.read())
 
-    返回值说明：
-    - status: 服务状态（healthy表示正常）
-    - service: 服务名称标识
-    - version: 当前服务版本号
-    """
-    return {
-        "status": "healthy",           # 服务健康状态
-        "service": "rsod-web-platform", # 服务名称
-        "version": "1.0.0"             # 服务版本
-    }
+        # 2. YOLO 推理，固定保存目录，避免 exp1/exp2
+        results = model(
+            temp_path,
+            save=True,
+            project="static/results",
+            name="latest",  # 固定目录名，每次覆盖
+            exist_ok=True
+        )
 
-# 根路径接口 - GET请求
-@app.get("/", tags=["根路径"])
-async def root():
-    """
-    根路径欢迎接口
-    返回平台欢迎信息
-    """
-    return {"message": "欢迎使用遥感目标智能检测平台"}
+        # 3. 获取标注图片路径（更可靠的方式）
+        result_img_path = os.path.join(
+            "static/results/latest",
+            os.path.basename(temp_path)
+        )
 
-# ==================== 应用启动入口 ====================
-# 判断是否直接运行本文件（而非被导入）
+        # 验证文件是否存在
+        if not os.path.exists(result_img_path):
+            raise Exception(f"结果图片未生成：{result_img_path}")
+
+        # 4. 生成可访问的 URL
+        result_img_url = f"http://localhost:8000/{result_img_path}"
+
+        # 5. 解析检测结果
+        detections = []
+        for box in results[0].boxes:
+            detections.append({
+                "class": model.names[int(box.cls[0])],
+                "confidence": float(box.conf[0]),
+                "bbox": box.xyxy[0].tolist()
+            })
+
+        # 6. 清理临时文件
+        os.remove(temp_path)
+
+        return {
+            "code": 200,
+            "message": "推理成功",
+            "data": {
+                "detections": detections,
+                "image_url": result_img_url
+            }
+        }
+
+    except Exception as e:
+        # 打印完整错误栈，方便调试
+        import traceback
+        traceback.print_exc()
+        return JSONResponse(
+            status_code=500,
+            content={"code": 500, "message": f"推理失败: {str(e)}"}
+        )
+
 if __name__ == "__main__":
-    # 导入UVicorn ASGI服务器
-    import uvicorn
-    # 启动Web服务
-    # 参数说明：
-    # - app: FastAPI应用对象
-    # - host: 监听地址，0.0.0.0表示监听所有网络接口
-    # - port: 服务端口号
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
