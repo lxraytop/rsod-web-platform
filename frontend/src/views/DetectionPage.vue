@@ -53,9 +53,12 @@
       <div class="left-panel">
         <div class="panel-header">
           <span class="panel-title">检测预览</span>
-          <el-tag type="success" effect="light" class="result-tag">
+          <el-tag v-if="detectionResult" type="success" effect="light" class="result-tag">
             <el-icon class="el-icon--left"><Check /></el-icon>
             检测完成
+          </el-tag>
+          <el-tag v-else type="info" effect="light" class="result-tag">
+            等待上传
           </el-tag>
         </div>
 
@@ -83,7 +86,7 @@
         <div class="image-compare">
           <div class="image-card">
             <img
-              src="https://ultralytics.com/images/bus.jpg"
+              :src="originalImage"
               alt="原始图片"
               class="compare-image"
             />
@@ -91,12 +94,12 @@
           </div>
           <div class="image-card">
             <img
-              src="https://ultralytics.com/images/bus.jpg"
+              :src="resultImage"
               alt="检测结果"
               class="compare-image"
             />
             <div class="image-label">检测结果</div>
-            <div class="detection-mark"></div>
+            <div class="detection-mark" v-if="detectionResult"></div>
           </div>
         </div>
       </div>
@@ -121,10 +124,20 @@
             <el-icon><List /></el-icon>
             <span class="card-title">识别清单</span>
           </div>
-          <div class="empty-state">
+          <div v-if="!detectionResult || detectionResult.total_objects === 0" class="empty-state">
             <el-icon class="empty-icon"><CircleCheck /></el-icon>
             <p class="empty-text">未检测到目标</p>
             <p class="empty-desc">影像无异常目标</p>
+          </div>
+          <div v-else class="detection-list">
+            <div
+              v-for="(box, index) in detectionResult.boxes"
+              :key="index"
+              class="detection-item"
+            >
+              <span class="item-name">{{ box.class_name }}</span>
+              <span class="item-confidence">{{ (box.confidence * 100).toFixed(1) }}%</span>
+            </div>
           </div>
         </div>
 
@@ -135,13 +148,17 @@
             <span class="card-title">AI 诊断建议</span>
           </div>
           <div class="diagnosis-content">
-            <p>未检测到指定目标</p>
+            <p v-if="!detectionResult">未检测到指定目标</p>
+            <p v-else>
+              检测到 {{ detectionResult.total_objects }} 个目标，耗时 {{ detectionResult.detection_time }}s。
+              模型: {{ detectionResult.model_name }}
+            </p>
           </div>
         </div>
 
         <!-- 操作按钮 -->
         <div class="action-buttons">
-          <el-button size="default" class="btn-secondary">
+          <el-button size="default" class="btn-secondary" @click="handleRedetect">
             <el-icon><Refresh /></el-icon>
             重新检测
           </el-button>
@@ -156,6 +173,7 @@
 
 <script setup>
 import { ref } from "vue";
+import { ElMessage, ElLoading } from "element-plus";
 import {
   Picture,
   Plus,
@@ -169,10 +187,15 @@ import {
   Refresh,
   Minus,
 } from "@element-plus/icons-vue";
+import { detectSingleImage } from "../api/detection";
 
 const selectedModel = ref("pest-v1");
 const activeTab = ref("single");
 const compareMode = ref("side");
+const originalImage = ref("https://ultralytics.com/images/bus.jpg");
+const resultImage = ref("https://ultralytics.com/images/bus.jpg");
+const detectionResult = ref(null);
+const isDetecting = ref(false);
 
 const functionTabs = [
   {
@@ -217,17 +240,58 @@ const handleTabClick = (key) => {
   }
 };
 
-const handleFileChange = (event, tabKey) => {
+const handleFileChange = async (event, tabKey) => {
   event.stopPropagation();
   event.preventDefault();
   const files = event.target.files;
   if (files && files.length > 0) {
-    console.log(`上传文件类型: ${tabKey}`);
-    console.log('文件:', files);
+    if (tabKey === "single") {
+      await performSingleDetection(files[0]);
+    }
   }
   setTimeout(() => {
     event.target.value = '';
   }, 0);
+};
+
+const performSingleDetection = async (file) => {
+  const loading = ElLoading.service({
+    lock: true,
+    text: "正在检测中...",
+    background: "rgba(0, 0, 0, 0.7)",
+  });
+
+  try {
+    isDetecting.value = true;
+
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("model_name", selectedModel.value);
+
+    originalImage.value = URL.createObjectURL(file);
+
+    const response = await detectSingleImage(formData);
+    if (response.success && response.data) {
+      detectionResult.value = response.data;
+      resultImage.value = response.data.result_image_url;
+      ElMessage.success("检测成功！");
+    } else {
+      ElMessage.error(response.message || "检测失败");
+    }
+  } catch (error) {
+    console.error("检测错误:", error);
+    ElMessage.error("检测失败，请稍后重试");
+  } finally {
+    isDetecting.value = false;
+    loading.close();
+  }
+};
+
+const handleRedetect = () => {
+  const input = document.querySelector(`.function-tab[data-key="single"] .file-input`);
+  if (input) {
+    input.click();
+  }
 };
 </script>
 
@@ -523,6 +587,31 @@ const handleFileChange = (event, tabKey) => {
 .empty-desc {
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+.detection-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.detection-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background-color: #f9fafb;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+.item-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.item-confidence {
+  color: var(--primary-color);
+  font-weight: 600;
 }
 
 .diagnosis-content {

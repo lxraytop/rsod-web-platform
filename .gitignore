@@ -19,6 +19,7 @@ storage/
 
 # 模型文件
 models/*.pt
+*.pt
 
 # IDE配置
 .vscode/
@@ -28,3 +29,8 @@ models/*.pt
 
 # 日志文件
 *.log
+
+# 备份目录
+frontend_backup/
+frontend_backup_before_doc4/
+backend/static/
